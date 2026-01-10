@@ -13,6 +13,7 @@ import android.util.Log
 import com.topjohnwu.superuser.CallbackList
 import com.topjohnwu.superuser.Shell
 import com.topjohnwu.superuser.ShellUtils
+import com.topjohnwu.superuser.internal.MainShell
 import com.topjohnwu.superuser.io.SuFile
 import me.bmax.apatch.APApplication
 import me.bmax.apatch.APApplication.Companion.SUPERCMD
@@ -23,6 +24,7 @@ import java.io.File
 import java.security.MessageDigest
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
+import java.util.Properties
 import java.util.zip.ZipFile
 
 private const val TAG = "APatchCli"
@@ -75,12 +77,62 @@ fun createRootShell(globalMnt: Boolean = false): Shell {
     }
 }
 
+private fun createMainRootShell() : Shell {
+    val builder = Shell.Builder.create()
+        .setInitializers(RootShellInitializer::class.java)
+        .setCommands(SUPERCMD, APApplication.superKey, "-Z", APApplication.MAGISK_SCONTEXT)
+    val shell = try {
+        builder.build()
+    } catch (e: Throwable) {
+        Log.e(TAG, "su failed: ", e)
+        builder.setCommands(getKPatchPath(), APApplication.superKey, "su", "-Z", APApplication.MAGISK_SCONTEXT)
+        try {
+            builder.build()
+        } catch (e: Throwable) {
+            Log.e(TAG, "retry kpatch su failed: ", e)
+            builder.setCommands("su")
+            try {
+                builder.build()
+            } catch (e: Throwable) {
+                Log.e(TAG, "retry su failed: ", e)
+                builder.setCommands("sh")
+                builder.build()
+            }
+        }
+    }
+
+    MainShell.setBuilder(builder)
+    return shell
+}
+
 object APatchCli {
-    var SHELL: Shell = createRootShell()
+    var SHELL: Shell = createMainRootShell()
     val GLOBAL_MNT_SHELL: Shell = createRootShell(true)
     fun refresh() {
         val tmp = SHELL
-        SHELL = createRootShell()
+
+        val clazz = MainShell::class.java // reset MainShell
+        clazz.getDeclaredField("isInitMain").apply {
+            isAccessible = true
+            setBoolean(null, false)
+            isAccessible = false
+        }
+
+        clazz.getDeclaredField("mainShell").apply {
+            isAccessible = true
+            @Suppress("UNCHECKED_CAST")
+            val arr = get(null) as Array<Any?>
+            arr[0] = null
+            isAccessible = false
+        }
+
+        clazz.getDeclaredField("mainBuilder").apply {
+            isAccessible = true
+            set(null, null)
+            isAccessible = false
+        }
+
+        SHELL = createMainRootShell()
         tmp.close()
     }
 }
@@ -162,6 +214,30 @@ fun listModules(): String {
        .to(ArrayList(),null).exec()
    }
     return out.joinToString("\n").ifBlank { "[]" }
+}
+
+fun hasMetaModule(): Boolean {
+    return getMetaModuleImplement() != "None"
+}
+
+fun getMetaModuleImplement(): String {
+    try {
+        val metaModuleProp = SuFile.open("/data/adb/metamodule/module.prop")
+        if (!metaModuleProp.isFile) {
+            Log.i(TAG, "Meta module implement: None")
+            return "None"
+        }
+
+        val prop = Properties()
+        prop.load(metaModuleProp.newInputStream())
+
+        val name = prop.getProperty("name")
+        Log.i(TAG, "Meta module implement: $name")
+        return name
+    } catch (t : Throwable) {
+        Log.i(TAG, "Meta module implement: None")
+        return "None"
+    }
 }
 
 fun toggleModule(id: String, enable: Boolean): Boolean {
